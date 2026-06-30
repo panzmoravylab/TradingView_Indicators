@@ -1,0 +1,545 @@
+//@version=6
+indicator("FX Cyber HUD Matrix v13 - Advanced Stop Edition", overlay=true, max_labels_count=500, max_lines_count=500, explicit_plot_zorder=true)
+
+// =========================================================================
+// 1. NASTAVENÍ A BAREVNÁ PALETA (SCI-FI NEON DESIGN)
+// =========================================================================
+var color clrNeonCyan   = color.rgb(0, 255, 255)
+var color clrNeonRed    = color.rgb(255, 49, 49)
+var color clrNeonGreen  = color.rgb(57, 255, 20)
+var color clrCyberGold  = color.rgb(255, 215, 0)
+var color clrMatteGray  = color.rgb(60, 64, 66)
+var color clrAmbientChop = color.new(color.gray, 93)
+
+// Uživatelské vstupy - OPTIMALIZOVÁNO PRO FOREX A STOP HLADINY
+group_tuning    = "🎛️ Ladění citlivosti algoritmu (FX)"
+impulse_mult    = input.float(0.9, "Citlivost impulzu (Forex)", minval=0.4, maxval=3.0, step=0.1, group=group_tuning)
+prob_trigger    = input.int(45, "Minimální Pravděpodobnost %", minval=30, maxval=80, group=group_tuning)
+max_expiration  = input.int(5, "Expirace Stop příkazů (barů)", minval=1, maxval=20, group=group_tuning)
+
+group_stoch     = "⚡ Nastavení Chirurgické Spouště (Stochastic)"
+stoch_k_len     = input.int(8, "Stoch %K Perioda", minval=3, group=group_stoch)
+stoch_d_len     = input.int(3, "Stoch %D Vyhlazení", minval=1, group=group_stoch)
+stoch_smooth    = input.int(3, "Stoch Interní Zpomalení", minval=1, group=group_stoch)
+
+group_structure = "1. Detekce Mikrostruktur (HH/HL/LH/LL)"
+show_horizons   = input.bool(true, "Zobrazit samočistící linie likvidity", group=group_structure)
+
+group_filters   = "2. Volatilita & Filtry"
+chop_threshold  = input.float(0.5, "Chop Práh ATR Ratio", minval=0.2, maxval=1.5, group=group_filters)
+adx_level       = input.int(12, "Práh síly trendu ADX", minval=5, maxval=50, group=group_filters)
+
+// Dynamický formát ceny podle typu instrumentu (Gold vs Forex)
+string price_format = syminfo.mintick == 0.01 ? "#.##" : (syminfo.mintick == 0.00001 ? "#.#####" : "#.###")
+
+// =========================================================================
+// 2. GLOBÁLNÍ MATEMATICKÝ SCOPE
+// =========================================================================
+atr_fast = ta.atr(3) 
+atr_slow = ta.atr(12) 
+atr_ratio = atr_fast / atr_slow
+
+atr_slow_ma_100 = ta.sma(atr_slow, 100)
+is_atr_chop = (atr_ratio < chop_threshold) or (atr_slow < atr_slow_ma_100 * 0.4)
+
+// KONSOLIDACE: Detekce úzkého cenového rozpětí (Tight Range Shield)
+highest_10 = ta.highest(high, 10)
+lowest_10  = ta.lowest(low, 10)
+range_10   = highest_10 - lowest_10
+range_10_ma = ta.sma(range_10, 50)
+is_consolidation = range_10 < range_10_ma * 0.70
+
+is_chop = is_atr_chop or is_consolidation
+
+// KVALITA IMPULZU & SÍLA svíček
+candle_range = high - low
+body_range   = math.abs(close - open)
+float impulse_quality = candle_range > 0 ? (body_range / candle_range) * 100 : 0.0
+
+is_bull_impulse = (close > open) and (candle_range > impulse_mult * atr_slow) and not is_chop
+is_bear_impulse = (close < open) and (candle_range > impulse_mult * atr_slow) and not is_chop
+
+var int consecutive_impulses = 0
+if is_bull_impulse or is_bear_impulse
+    consecutive_impulses := consecutive_impulses + 1
+else
+    consecutive_impulses := 0
+
+// Hustota knotů
+var float total_wicks = 0.0
+var float total_range = 0.0
+total_wicks := 0.0
+total_range := 0.0
+for i = 0 to 3 
+    t_wick = high[i] - math.max(open[i], close[i])
+    b_wick = math.min(open[i], close[i]) - low[i]
+    total_wicks := total_wicks + t_wick + b_wick
+    total_range := total_range + (high[i] - low[i])
+
+wick_density = total_range > 0 ? (total_wicks / total_range) * 100 : 0.0
+is_absorption = (wick_density > 55.0) and not is_chop
+
+// Adaptivní trendové linie a Stochastic
+vwap_line = ta.vwap(close)
+fast_ema  = ta.ema(close, 5) 
+slow_ema  = ta.ema(close, 15) 
+filter_ema = ta.ema(close, 50)
+
+stoch_raw = ta.stoch(close, high, low, stoch_k_len)
+stoch_k   = ta.sma(stoch_raw, stoch_smooth)
+stoch_d   = ta.sma(stoch_k, stoch_d_len)
+
+bool stoch_bull_trigger = stoch_k > stoch_d and stoch_k[1] <= stoch_d[1]
+bool stoch_bear_trigger = stoch_k < stoch_d and stoch_k[1] >= stoch_d[1]
+
+int trend_dir = fast_ema > slow_ema ? 1 : -1
+
+// AKCELERACE TRENDU
+ema_spread = fast_ema - slow_ema
+trend_acceleration = ta.change(ema_spread)
+bool is_accelerating = (trend_dir == 1 and trend_acceleration > 0) or (trend_dir == -1 and trend_acceleration < 0)
+
+// Laser Trail
+highest_high_3_prev = ta.highest(high, 3)[1]
+lowest_low_3_prev   = ta.lowest(low, 3)[1]
+highest_high_3 = ta.highest(high, 3)
+lowest_low_3   = ta.lowest(low, 3)
+float laser_trail = trend_dir == 1 ? highest_high_3 - (1.0 * atr_slow) : lowest_low_3 + (1.0 * atr_slow)
+
+bool trend_changed = ta.change(trend_dir) != 0
+float plot_laser = trend_changed ? na : laser_trail
+color clr_laser  = is_chop ? clrMatteGray : (trend_dir == 1 ? clrNeonCyan : clrCyberGold)
+
+[di_plus, di_minus, adx_value] = ta.dmi(10, 10) 
+rsi_fast = ta.rsi(close, 5) 
+
+// EXAKTNÍ TRENDOVÉ SKÓRE (0 - 100)
+float intensity_score = 0.0
+int points = 0
+if not is_chop
+    if (fast_ema > slow_ema and close > vwap_line) or (fast_ema < slow_ema and close < vwap_line)
+        points := points + 30
+    if (close > filter_ema and trend_dir == 1) or (close < filter_ema and trend_dir == -1)
+        points := points + 20
+    if (di_plus > di_minus and trend_dir == 1) or (close < filter_ema ? di_minus > di_plus : di_minus > di_plus and trend_dir == -1)
+        points := points + 20
+    if adx_value > adx_level
+        points := points + 15
+    if is_accelerating
+        points := points + 15
+    intensity_score := float(points)
+else
+    intensity_score := 25.0 
+
+// Výpočet Pravděpodobnosti pokračování
+float continuation_prob = 50.0
+if not is_chop
+    base_prob = 45.0 + (adx_value * 1.0)
+    if trend_dir == 1 and rsi_fast < 88 
+        base_prob := base_prob + 10
+    if trend_dir == -1 and rsi_fast > 12
+        base_prob := base_prob + 10
+    continuation_prob := math.max(30.0, math.min(95.0, base_prob))
+else
+    continuation_prob := 30.0
+
+// Early trigger vstupy
+bool early_break_buy  = close > highest_high_3_prev
+bool early_break_sell = close < lowest_low_3_prev
+
+// =========================================================================
+// 3. DETEKCE MIKROSTRUKTUR & VYČERPÁNÍ
+// =========================================================================
+ph = ta.pivothigh(high, 2, 2)
+pl = ta.pivotlow(low, 2, 2)
+
+var float last_ph = na
+var float last_pl = na
+bool is_hh = false
+bool is_lh = false
+bool is_hl = false
+bool is_ll = false
+
+if not na(ph)
+    is_hh := na(last_ph) or ph > last_ph
+    is_lh := not is_hh
+    last_ph := ph
+if not na(pl)
+    is_hl := na(last_pl) or pl > last_pl
+    is_ll := not is_hl
+    last_pl := pl
+
+// Real-time PA unavení svíčky
+float current_body = math.abs(close - open)
+bool buy_wick_rejection  = (high - math.max(open, close)) > (body_range * 1.4) and (stoch_k > 78 or rsi_fast > 68)
+bool sell_wick_rejection = (math.min(open, close) - low) > (body_range * 1.4) and (stoch_k < 22 or rsi_fast < 32)
+
+bool is_exhausted = false
+if intensity_score > 70
+    if (trend_dir == 1 and (trend_acceleration < 0 or buy_wick_rejection)) or (trend_dir == -1 and (trend_acceleration > 0 or sell_wick_rejection))
+        is_exhausted := true
+
+bool exhausted_changed = ta.change(is_exhausted)
+
+// Samočistící linie likvidity
+var line active_hh_line = na
+var line active_ll_line = na
+
+if not na(ph) and show_horizons
+    if not na(active_hh_line)
+        line.set_x2(active_hh_line, bar_index)
+    active_hh_line := line.new(x1=bar_index-2, y1=ph, x2=bar_index, y2=ph, color=color.new(clrNeonRed, 40), width=1, style=line.style_solid)
+
+if not na(pl) and show_horizons
+    if not na(active_ll_line)
+        line.set_x2(active_ll_line, bar_index)
+    active_ll_line := line.new(x1=bar_index-2, y1=pl, x2=bar_index, y2=pl, color=color.new(clrNeonGreen, 40), width=1, style=line.style_solid)
+
+if not na(active_hh_line)
+    if high >= line.get_y1(active_hh_line) and bar_index > line.get_x1(active_hh_line) + 2
+        line.set_x2(active_hh_line, bar_index)
+        line.set_color(active_hh_line, color.new(color.gray, 75))
+        line.set_style(active_hh_line, line.style_dotted)
+        active_hh_line := na 
+    else
+        line.set_x2(active_hh_line, bar_index)
+
+if not na(active_ll_line)
+    if low <= line.get_y1(active_ll_line) and bar_index > line.get_x1(active_ll_line) + 2
+        line.set_x2(active_ll_line, bar_index)
+        line.set_color(active_ll_line, color.new(color.gray, 75))
+        line.set_style(active_ll_line, line.style_dotted)
+        active_ll_line := na 
+    else
+        line.set_x2(active_ll_line, bar_index)
+
+// =========================================================================
+// 4. CHYTRÝ STAVOVÝ AUTOMAT PRO STOP HLADINY, SAFE SL/TP A SLEDOVÁNÍ TRHU
+// =========================================================================
+var int market_position = 0
+var int exit_reason = 0 
+
+var int pending_type = 0
+var float pending_price = na
+var float current_sl = na
+var float current_tp = na
+var float entry_price = na
+var int pending_start_bar = 0
+
+// Reference na grafické objekty
+var line active_pending_line = na
+var line active_sl_line = na
+var line active_tp_line = na
+var label active_pending_label = na
+
+bool buy_trigger  = false
+bool sell_trigger = false
+
+bool buy_setup  = is_bull_impulse and trend_dir == 1 and intensity_score >= 50 and continuation_prob >= prob_trigger and stoch_bull_trigger and market_position == 0 and pending_type == 0
+bool sell_setup = is_bear_impulse and trend_dir == -1 and intensity_score >= 50 and continuation_prob >= prob_trigger and stoch_bear_trigger and market_position == 0 and pending_type == 0
+
+// Inicializace a propočty bezpečných hladin
+if buy_setup
+    pending_type := 1
+    pending_price := highest_high_3 + (0.1 * atr_slow)
+    current_sl := pending_price - (1.5 * atr_slow) 
+    current_tp := pending_price + (1.1 * atr_slow) 
+    pending_start_bar := bar_index
+    
+    active_pending_line := line.new(x1=bar_index, y1=pending_price, x2=bar_index, y2=pending_price, color=clrNeonGreen, width=2, style=line.style_dashed)
+    active_sl_line := line.new(x1=bar_index, y1=current_sl, x2=bar_index, y2=current_sl, color=color.rgb(255, 82, 82), width=1, style=line.style_dotted)
+    active_tp_line := line.new(x1=bar_index, y1=current_tp, x2=bar_index, y2=current_tp, color=color.rgb(0, 229, 255), width=1, style=line.style_dotted)
+    active_pending_label := label.new(x=bar_index, y=pending_price, text="BUY-STOP (@" + str.tostring(pending_price, price_format) + ")", color=color.new(color.black, 15), textcolor=clrNeonGreen, style=label.style_label_left, size=size.small, text_font_family=font.family_monospace)
+
+if sell_setup
+    pending_type := -1
+    pending_price := lowest_low_3 - (0.1 * atr_slow)
+    current_sl := pending_price + (1.5 * atr_slow) 
+    current_tp := pending_price - (1.1 * atr_slow) 
+    pending_start_bar := bar_index
+    
+    active_pending_line := line.new(x1=bar_index, y1=pending_price, x2=bar_index, y2=pending_price, color=clrNeonRed, width=2, style=line.style_dashed)
+    active_sl_line := line.new(x1=bar_index, y1=current_sl, x2=bar_index, y2=current_sl, color=color.rgb(255, 82, 82), width=1, style=line.style_dotted)
+    active_tp_line := line.new(x1=bar_index, y1=current_tp, x2=bar_index, y2=current_tp, color=color.rgb(0, 229, 255), width=1, style=line.style_dotted)
+    active_pending_label := label.new(x=bar_index, y=pending_price, text="SELL-STOP (@" + str.tostring(pending_price, price_format) + ")", color=color.new(color.black, 15), textcolor=clrNeonRed, style=label.style_label_left, size=size.small, text_font_family=font.family_monospace)
+
+// Průběžné natahování linek v reálném čase podle stavu
+if pending_type != 0
+    line.set_x2(active_pending_line, bar_index)
+    line.set_x2(active_sl_line, bar_index)
+    line.set_x2(active_tp_line, bar_index)
+    label.set_x(active_pending_label, bar_index)
+
+if market_position != 0
+    line.set_x2(active_sl_line, bar_index)
+    line.set_x2(active_tp_line, bar_index)
+
+string cancel_reason = ""
+bool pending_canceled = false
+
+// Živá správa čekajícího BUY příkazu
+if pending_type == 1
+    if high >= pending_price 
+        buy_trigger := true
+        market_position := 1
+        entry_price := pending_price
+        line.set_color(active_pending_line, clrNeonGreen)
+        label.set_text(active_pending_label, "✓ BUY-STOP TRGD (@" + str.tostring(pending_price, price_format) + ")")
+        
+        line.set_style(active_sl_line, line.style_solid)
+        line.set_style(active_tp_line, line.style_solid)
+        line.set_width(active_sl_line, 2)
+        line.set_width(active_tp_line, 2)
+        pending_type := 0
+    else if bar_index - pending_start_bar >= max_expiration
+        cancel_reason := "TIMEOUT", pending_canceled := true
+    else if is_chop
+        cancel_reason := "CHOP", pending_canceled := true
+    else if trend_dir == -1
+        cancel_reason := "FLIP", pending_canceled := true
+        
+    if pending_canceled
+        line.set_color(active_pending_line, color.new(color.gray, 60))
+        line.set_style(active_pending_line, line.style_dotted)
+        line.delete(active_sl_line)
+        line.delete(active_tp_line)
+        label.set_text(active_pending_label, "✕ BUY-STOP CNCL (" + cancel_reason + ") [@" + str.tostring(pending_price, price_format) + "]")
+        label.set_textcolor(active_pending_label, color.gray)
+        pending_type := 0
+        current_sl := na, current_tp := na
+
+// Živá správa čekajícího SELL příkazu
+else if pending_type == -1
+    if low <= pending_price 
+        sell_trigger := true
+        market_position := -1
+        entry_price := pending_price
+        line.set_color(active_pending_line, clrNeonRed)
+        label.set_text(active_pending_label, "✓ SELL-STOP TRGD (@" + str.tostring(pending_price, price_format) + ")")
+        
+        line.set_style(active_sl_line, line.style_solid)
+        line.set_style(active_tp_line, line.style_solid)
+        line.set_width(active_sl_line, 2)
+        line.set_width(active_tp_line, 2)
+        pending_type := 0
+    else if bar_index - pending_start_bar >= max_expiration
+        cancel_reason := "TIMEOUT", pending_canceled := true
+    else if is_chop
+        cancel_reason := "CHOP", pending_canceled := true
+    else if trend_dir == 1
+        cancel_reason := "FLIP", pending_canceled := true
+        
+    if pending_canceled
+        line.set_color(active_pending_line, color.new(color.gray, 60))
+        line.set_style(active_pending_line, line.style_dotted)
+        line.delete(active_sl_line)
+        line.delete(active_tp_line)
+        label.set_text(active_pending_label, "✕ SELL-STOP CNCL (" + cancel_reason + ") [@" + str.tostring(pending_price, price_format) + "]")
+        label.set_textcolor(active_pending_label, color.gray)
+        pending_type := 0
+        current_sl := na, current_tp := na
+
+// Vyhodnocení běžících tržních exity (Dohled nad SL/TP a PA filtry)
+bool do_exit_buy = false
+bool do_exit_sell = false
+
+if market_position == 1
+    if high >= current_tp 
+        do_exit_buy := true, exit_reason := 5
+    else if low <= current_sl 
+        do_exit_buy := true, exit_reason := 6
+    else if buy_wick_rejection
+        do_exit_buy := true, exit_reason := 1
+    else if stoch_k < stoch_d and stoch_k[1] > 75
+        do_exit_buy := true, exit_reason := 2
+    else if not na(ph) or is_exhausted or trend_dir == -1
+        do_exit_buy := true, exit_reason := 3
+    else if is_chop
+        do_exit_buy := true, exit_reason := 4
+
+if market_position == -1
+    if low <= current_tp 
+        do_exit_sell := true, exit_reason := 5
+    else if high >= current_sl 
+        do_exit_sell := true, exit_reason := 6
+    else if sell_wick_rejection
+        do_exit_sell := true, exit_reason := 1
+    else if stoch_k > stoch_d and stoch_k[1] < 25
+        do_exit_sell := true, exit_reason := 2
+    else if not na(pl) or is_exhausted or trend_dir == 1
+        do_exit_sell := true, exit_reason := 3
+    else if is_chop
+        do_exit_sell := true, exit_reason := 4
+
+// Uklizení linek po kompletním uzavření tržní pozice
+if do_exit_buy or do_exit_sell
+    market_position := 0
+    line.set_color(active_sl_line, color.new(color.gray, 70))
+    line.set_color(active_tp_line, color.new(color.gray, 70))
+    current_sl := na, current_tp := na, entry_price := na
+
+// Podklady pro vysoce kontrastní data v HUDu
+string table_entry = "-"
+string table_targets = "-"
+color entry_cell_bg = color.new(color.black, 100) // OPRAVA: color.clear nahrazeno plnou průhledností
+color entry_cell_fg = color.gray
+
+if pending_type != 0
+    table_entry := "@ " + str.tostring(pending_price, price_format)
+    table_targets := "TP: " + str.tostring(current_tp, price_format) + " | SL: " + str.tostring(current_sl, price_format)
+    entry_cell_bg := color.new(clrCyberGold, 85)
+    entry_cell_fg := clrCyberGold
+else if market_position != 0 or buy_trigger or sell_trigger
+    table_entry := "LIVE @ " + str.tostring(entry_price, price_format)
+    table_targets := "TP: " + str.tostring(current_tp, price_format) + " | SL: " + str.tostring(current_sl, price_format)
+    entry_cell_bg := color.new(clrNeonCyan, 85)
+    entry_cell_fg := clrNeonCyan
+
+// =========================================================================
+// 5. VIZUALIZACE V GRAFU & POPISKY (EXAKTNÍ VRSTVOVÁNÍ NAD SVÍČKY)
+// =========================================================================
+string text_exit_buy  = exit_reason == 1 ? "PEAK REJECTION" : (exit_reason == 2 ? "STOCH EXIT" : (exit_reason == 3 ? "EXHAUSTION" : (exit_reason == 4 ? "CHOP FILTER" : (exit_reason == 5 ? "TAKE PROFIT" : "STOP LOSS"))))
+string text_exit_sell = exit_reason == 1 ? "PEAK REJECTION" : (exit_reason == 2 ? "STOCH EXIT" : (exit_reason == 3 ? "EXHAUSTION" : (exit_reason == 4 ? "CHOP FILTER" : (exit_reason == 5 ? "TAKE PROFIT" : "STOP LOSS"))))
+
+bgcolor(is_chop ? clrAmbientChop : na)
+
+// 1. Vykreslíme svíčky pod indikátory
+color dynamic_candle_color = is_chop ? clrMatteGray : (is_bull_impulse ? clrNeonCyan : (is_bear_impulse ? clrNeonRed : (trend_dir == 1 ? color.rgb(20, 100, 40) : color.rgb(140, 40, 40))))
+plotcandle(open, high, low, close, title="Cyber Candles", color=dynamic_candle_color, wickcolor=dynamic_candle_color, bordercolor=dynamic_candle_color)
+
+// 2. Všechny ostatní ploty a tvary se díky explicit_plot_zorder vykreslí NAD svíčky
+plot(plot_laser, title="Laser Trail", color=clr_laser, linewidth=2, style=plot.style_linebr)
+plotshape(is_absorption, title="Absorption Aura", style=shape.diamond, location=location.abovebar, color=color.new(clrCyberGold, 30), size=size.small)
+
+plotshape(not na(ph) and is_hh, title="Micro HH", style=shape.labeldown, location=location.abovebar, color=color.new(clrNeonRed, 15), textcolor=color.white, text="HH", size=size.small)
+plotshape(not na(ph) and is_lh, title="Micro LH", style=shape.labeldown, location=location.abovebar, color=color.new(clrMatteGray, 15), textcolor=color.white, text="LH", size=size.small)
+plotshape(not na(pl) and is_hl, title="Micro HL", style=shape.labelup, location=location.belowbar, color=color.new(clrMatteGray, 15), textcolor=color.white, text="HL", size=size.small)
+plotshape(not na(pl) and is_ll, title="Micro LL", style=shape.labelup, location=location.belowbar, color=color.new(clrNeonGreen, 15), textcolor=color.white, text="LL", size=size.small)
+
+plotshape(is_exhausted and exhausted_changed, title="Trend Exhaustion", style=shape.labeldown, location=location.abovebar, color=color.new(color.purple, 20), textcolor=color.white, text="⚠️ EXHAUSTED", size=size.small)
+
+bool buy_strong   = buy_trigger and intensity_score > 80
+bool buy_surge    = buy_trigger and intensity_score <= 80
+bool sell_strong  = sell_trigger and intensity_score > 80
+bool sell_surge   = sell_trigger and intensity_score <= 80
+
+plotshape(buy_strong, title="STRONG BUY Entry", style=shape.arrowup, location=location.belowbar, color=clrNeonGreen, text="STRONG BUY", textcolor=clrNeonGreen, size=size.normal)
+plotshape(buy_surge, title="BUY Surge Entry", style=shape.arrowup, location=location.belowbar, color=clrNeonGreen, text="BUY SURGE", textcolor=clrNeonGreen, size=size.normal)
+plotshape(sell_strong, title="STRONG SHORT Entry", style=shape.arrowdown, location=location.abovebar, color=clrNeonRed, text="STRONG SHORT", textcolor=clrNeonRed, size=size.normal)
+plotshape(sell_surge, title="SELL Surge Entry", style=shape.arrowdown, location=location.abovebar, color=clrNeonRed, text="SELL SURGE", textcolor=clrNeonRed, size=size.normal)
+
+bool exit_buy_triggered  = do_exit_buy and not buy_trigger
+bool exit_sell_triggered = do_exit_sell and not sell_trigger
+
+plotshape(exit_buy_triggered and exit_reason == 1, title="Exit BUY Peak Rejection", style=shape.xcross, location=location.abovebar, color=color.rgb(255, 102, 0), text="EXIT: PEAK REJECTION", textcolor=color.rgb(255, 102, 0), size=size.small)
+plotshape(exit_buy_triggered and exit_reason == 2, title="Exit BUY Stoch Exit", style=shape.xcross, location=location.abovebar, color=color.rgb(255, 102, 0), text="EXIT: STOCH EXIT", textcolor=color.rgb(255, 102, 0), size=size.small)
+plotshape(exit_buy_triggered and exit_reason == 3, title="Exit BUY Exhaustion", style=shape.xcross, location=location.abovebar, color=color.rgb(255, 102, 0), text="EXIT: EXHAUSTION", textcolor=color.rgb(255, 102, 0), size=size.small)
+plotshape(exit_buy_triggered and exit_reason == 4, title="Exit BUY Chop Filter", style=shape.xcross, location=location.abovebar, color=color.rgb(255, 102, 0), text="EXIT: CHOP FILTER", textcolor=color.rgb(255, 102, 0), size=size.small)
+plotshape(exit_buy_triggered and exit_reason == 5, title="Exit BUY Take Profit", style=shape.circle, location=location.abovebar, color=clrNeonCyan, text="TP TARGET HIT 🎯", textcolor=clrNeonCyan, size=size.small)
+plotshape(exit_buy_triggered and exit_reason == 6, title="Exit BUY Stop Loss", style=shape.circle, location=location.abovebar, color=clrNeonRed, text="SL HIT 🛑", textcolor=clrNeonRed, size=size.small)
+
+plotshape(exit_sell_triggered and exit_reason == 1, title="Exit SELL Peak Rejection", style=shape.xcross, location=location.belowbar, color=color.rgb(255, 102, 0), text="EXIT: PEAK REJECTION", textcolor=color.rgb(255, 102, 0), size=size.small)
+plotshape(exit_sell_triggered and exit_reason == 2, title="Exit SELL Stoch Exit", style=shape.xcross, location=location.belowbar, color=color.rgb(255, 102, 0), text="EXIT: STOCH EXIT", textcolor=color.rgb(255, 102, 0), size=size.small)
+plotshape(exit_sell_triggered and exit_reason == 3, title="Exit SELL Exhaustion", style=shape.xcross, location=location.belowbar, color=color.rgb(255, 102, 0), text="EXIT: EXHAUSTION", textcolor=color.rgb(255, 102, 0), size=size.small)
+plotshape(exit_sell_triggered and exit_reason == 4, title="Exit SELL Chop Filter", style=shape.xcross, location=location.belowbar, color=color.rgb(255, 102, 0), text="EXIT: CHOP FILTER", textcolor=color.rgb(255, 102, 0), size=size.small)
+plotshape(exit_sell_triggered and exit_reason == 5, title="Exit SELL Take Profit", style=shape.circle, location=location.belowbar, color=clrNeonCyan, text="TP TARGET HIT 🎯", textcolor=clrNeonCyan, size=size.small)
+plotshape(exit_sell_triggered and exit_reason == 6, title="Exit SELL Stop Loss", style=shape.circle, location=location.belowbar, color=clrNeonRed, text="SL HIT 🛑", textcolor=clrNeonRed, size=size.small)
+
+// =========================================================================
+// 6. DIAGNOSTICKÝ PANEL (Vpravo nahoře)
+// =========================================================================
+var table hud = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 15), border_color=clrMatteGray, border_width=1)
+if barstate.islast
+    table.cell(hud, 0, 0, "CYBER CORE HUD v12", bgcolor=clrMatteGray, text_color=color.white, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 0, syminfo.ticker + " " + timeframe.period, bgcolor=clrMatteGray, text_color=clrNeonCyan, text_size=size.small, text_font_family=font.family_monospace)
+    
+    table.cell(hud, 0, 1, "MARKET STATUS:", text_color=color.silver, text_size=size.small, text_font_family=font.family_monospace, text_halign=text.align_left)
+    table.cell(hud, 1, 1, is_consolidation ? "TIGHT SQUEEZE" : (is_chop ? "CHOP / NO VOL" : "ACCELERATING"), bgcolor=is_chop ? color.new(clrNeonRed, 80) : color.new(clrNeonGreen, 80), text_color=is_chop ? clrNeonRed : clrNeonGreen, text_size=size.small, text_font_family=font.family_monospace)
+    
+    table.cell(hud, 0, 2, "TREND SCORE (0-100):", text_color=color.silver, text_size=size.small, text_font_family=font.family_monospace, text_halign=text.align_left)
+    color score_color = intensity_score >= 80 ? clrNeonCyan : (intensity_score >= 50 ? clrNeonGreen : clrMatteGray)
+    string score_text = str.tostring(intensity_score, "0") + (intensity_score >= 80 ? " [HYPER]" : (intensity_score >= 50 ? " [TREND]" : " [FLAT]"))
+    table.cell(hud, 1, 2, score_text, text_color=score_color, text_size=size.small, text_font_family=font.family_monospace)
+    
+    table.cell(hud, 0, 3, "IMPULSE QUALITY:", text_color=color.silver, text_size=size.small, text_font_family=font.family_monospace, text_halign=text.align_left)
+    table.cell(hud, 1, 3, str.tostring(impulse_quality, "0") + " % (Seq: " + str.tostring(consecutive_impulses) + ")", text_color=color.white, text_size=size.small, text_font_family=font.family_monospace)
+    
+    table.cell(hud, 0, 4, "CONTINUATION PROB:", text_color=color.silver, text_size=size.small, text_font_family=font.family_monospace, text_halign=text.align_left)
+    table.cell(hud, 1, 4, str.tostring(continuation_prob, "0") + " %", text_color=clrCyberGold, text_size=size.small, text_font_family=font.family_monospace)
+
+// =========================================================================
+// 7. HLAVNÍ EXEKUČNÍ PANEL (ROZŠÍŘENÁ EXKLUZIVNÍ MATRICE PRO ČEKACÍ PŘÍKAZY)
+// =========================================================================
+var table action_hud = table.new(position.middle_right, 2, 5, bgcolor=color.new(color.black, 10), border_color=clrMatteGray, border_width=1)
+string exec_signal = "WAIT!!"
+color exec_bg       = clrMatteGray
+color exec_txt_clr  = color.silver
+string exec_note    = "Čekám na konfluenci..."
+
+if pending_type == 1
+    exec_signal  := "PENDING BUY"
+    exec_bg      := color.new(clrNeonGreen, 50)
+    exec_txt_clr := color.white
+    exec_note    := "Zavěšen příkaz BUY-STOP. Čekám na validní průraz..."
+else if pending_type == -1
+    exec_signal  := "PENDING SELL"
+    exec_bg      := color.new(clrNeonRed, 50)
+    exec_txt_clr := color.white
+    exec_note    := "Zavěšen příkaz SELL-STOP. Čekám na validní průraz..."
+else if is_chop and market_position == 0
+    exec_signal  := "WAIT!!"
+    exec_bg      := clrMatteGray
+    exec_txt_clr := color.silver
+    exec_note    := is_consolidation ? "Úzké rozpětí (Squeeze). SIGNÁLY ZABLOKOVÁNY!" : "Nízká volatilita (Chop). Stát mimo trh."
+else
+    if buy_trigger
+        exec_signal  := intensity_score >= 80 ? "STRONG BUY!!" : "BUY!!"
+        exec_bg      := intensity_score >= 80 ? clrNeonCyan : clrNeonGreen
+        exec_txt_clr := color.black
+        exec_note    := "STOP OBJEDNÁVKA NAPLNĚNA! Vstup do dlouhé pozice..."
+    else if sell_trigger
+        exec_signal  := intensity_score >= 80 ? "STRONG SELL!!" : "SELL!!"
+        exec_bg      := clrNeonRed
+        exec_txt_clr := color.white
+        exec_note    := "STOP OBJEDNÁVKA NAPLNĚNA! Vstup do krátké pozice..."
+    else if do_exit_buy
+        exec_signal  := "EXIT BUY!!"
+        exec_bg      := color.rgb(255, 102, 0) 
+        exec_txt_clr := color.white
+        exec_note    := "DŮVOD: " + text_exit_buy + "! Okamžitě vybrat zisk!"
+    else if do_exit_sell
+        exec_signal  := "EXIT SELL!!"
+        exec_bg      := color.rgb(255, 102, 0) 
+        exec_txt_clr := color.white
+        exec_note    := "DŮVOD: " + text_exit_sell + "! Okamžitě vybrat zisk!"
+    else if market_position == 1
+        exec_signal  := is_exhausted ? "⚠️ EXHAUSTED" : "HOLD BUY"
+        exec_bg      := is_exhausted ? color.purple : color.rgb(0, 100, 80)
+        exec_txt_clr := color.white
+        exec_note    := is_exhausted ? "Trend se vyčerpává! Připravit prst na ukončení!" : "Obchod běží bezpečně. Cíl pro TP a SL drží pevnou strukturu."
+    else if market_position == -1
+        exec_signal  := is_exhausted ? "⚠️ EXHAUSTED" : "HOLD SELL"
+        exec_bg      := is_exhausted ? color.purple : color.rgb(120, 0, 40)
+        exec_txt_clr := color.white
+        exec_note    := is_exhausted ? "Trend se vyčerpává! Připravit prst na ukončení!" : "Obchod běží bezpečně. Cíl pro TP a SL drží pevnou strukturu."
+    else
+        exec_signal  := "WAIT!!"
+        exec_bg      := color.rgb(190, 110, 0)
+        exec_txt_clr := color.white
+        exec_note    := "Trend Intensity Score: " + str.tostring(intensity_score, "0") + " / 100. Nedostatečné momentum."
+
+if barstate.islast
+    table.cell(action_hud, 0, 0, "EXEKUČNÍ MATRICE", bgcolor=clrMatteGray, text_color=color.white, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(action_hud, 1, 0, "ŽIVÝ POVEL", bgcolor=clrMatteGray, text_color=clrCyberGold, text_size=size.small, text_font_family=font.family_monospace)
+    
+    table.cell(action_hud, 0, 1, "AKTUÁLNÍ OPERACE:", text_color=color.white, text_size=size.normal, text_font_family=font.family_monospace, text_halign=text.align_left)
+    table.cell(action_hud, 1, 1, exec_signal, bgcolor=exec_bg, text_color=exec_txt_clr, text_size=size.large, text_font_family=font.family_monospace, text_halign=text.align_center)
+    
+    table.cell(action_hud, 0, 2, "EXAKTNÍ VSTUP:", text_color=color.silver, text_size=size.small, text_font_family=font.family_monospace, text_halign=text.align_left)
+    table.cell(action_hud, 1, 2, table_entry, bgcolor=entry_cell_bg, text_color=entry_cell_fg, text_size=size.normal, text_font_family=font.family_monospace, text_halign=text.align_center)
+    
+    table.cell(action_hud, 0, 3, "MATRICE TP / SL:", text_color=color.silver, text_size=size.small, text_font_family=font.family_monospace, text_halign=text.align_left)
+    table.cell(action_hud, 1, 3, table_targets, text_color=color.white, text_size=size.small, text_font_family=font.family_monospace, text_halign=text.align_center)
+    
+    table.cell(action_hud, 0, 4, "ŘÍZENÍ RIZIKA:", text_color=color.silver, text_size=size.small, text_font_family=font.family_monospace, text_halign=text.align_left)
+    table.cell(action_hud, 1, 4, exec_note, text_color=color.white, text_size=size.small, text_font_family=font.family_monospace, text_halign=text.align_left)
