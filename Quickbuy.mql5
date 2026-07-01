@@ -1,0 +1,611 @@
+//+------------------------------------------------------------------+
+//|                                   QuickTrade / FASTCLICK — panel |
+//+------------------------------------------------------------------+
+#property copyright   "QuickTrade"
+#property version     "2.21"
+#property description "Hromadné obchody s manuální stop cenou a SL/TP v USD"
+
+input group        "=== Výchozí nastavení ==="
+input int          inp_DefaultCount  = 5;
+input double       inp_DefaultLot    = 0.01;
+input double       inp_DefaultSL_USD = 40.0;   // Výchozí SL v USD (0 = vypnuto)
+input double       inp_DefaultTP_USD = 40.0;   // Výchozí TP v USD (0 = vypnuto)
+
+input group        "=== Identifikace ==="
+input long         inp_Magic         = 123456;
+input string       inp_Comment       = "QuickTrade";
+
+input group        "=== Chování a bezpečnost ==="
+input bool         inp_CloseOnlyMagic= true;
+input bool         inp_ConfirmClose  = true;
+input bool         inp_CountMagicOnly= true;
+
+input group        "=== Panel (UX) ==="
+input int          inp_PanelWidth    = 184;
+input int          inp_LeftMargin    = 8;       
+input int          inp_BottomMargin  = 8;       
+input int          inp_PanelPadding  = 10;
+input int          inp_PanelOffsetY  = 0;     
+
+input group        "=== Graf (UX) ==="
+input bool         inp_ShowAvgLines  = true;
+input color        inp_ColorAvgBuy   = clrDodgerBlue;
+input color        inp_ColorAvgSell  = clrCrimson;
+input int          inp_AvgLineWidth  = 1;
+input ENUM_LINE_STYLE inp_AvgLineStyle = STYLE_DOT;
+
+#define OBJ_PREFIX "QT_"
+
+int    g_Count = 5;
+double g_Lot   = 0.01;
+double g_VolumeStep = 0.01;
+double g_VolumeMin  = 0.01;
+double g_VolumeMax  = 100.0;
+
+// Globální proměnné pro živé ovládání z panelu
+double g_PendingPrice = 0.0;
+double g_SL_USD       = 0.0;
+double g_TP_USD       = 0.0;
+
+ulong g_lastTradeTick = 0;
+const int TRADE_COOLDOWN_MS = 400;
+
+static int s_lastChartW = 0;
+static int s_lastChartH = 0;
+
+int g_px = 0; int g_py = 0; int g_pw = 184; int g_ph = 275; 
+int g_pad = 10; int g_row = 22; int g_btn = 26; int g_gap = 3;
+int g_fs_t = 9; int g_fs_n = 8; int g_fs_v = 9;
+
+//+------------------------------------------------------------------+
+//| 1. GRAFICKÉ POMOCNÉ FUNKCE (ZÁKLADNÍ STAVEBNÍ BLOKY OBJEKTŮ)     |
+//+------------------------------------------------------------------+
+void MakeShadow(string n, int x, int y, int w, int h)
+  {
+   if(ObjectFind(0, n) < 0) ObjectCreate(0, n, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x); ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, n, OBJPROP_XSIZE, w); ObjectSetInteger(0, n, OBJPROP_YSIZE, h);
+   ObjectSetInteger(0, n, OBJPROP_BGCOLOR, C'12,14,22'); ObjectSetInteger(0, n, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, C'12,14,22'); ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false); ObjectSetInteger(0, n, OBJPROP_ZORDER, 0);
+  }
+
+void MakeBg(string n, int x, int y, int w, int h)
+  {
+   if(ObjectFind(0, n) < 0) ObjectCreate(0, n, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x); ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, n, OBJPROP_XSIZE, w); ObjectSetInteger(0, n, OBJPROP_YSIZE, h);
+   ObjectSetInteger(0, n, OBJPROP_BGCOLOR, C'30,34,46'); ObjectSetInteger(0, n, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, n, OBJPROP_COLOR, C'70,78,98'); ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false); ObjectSetInteger(0, n, OBJPROP_ZORDER, 1);
+  }
+
+void MakeLabel(const string n, const string txt, const int x, const int y, const int sz, const color clr, const bool bold, const ENUM_ANCHOR_POINT anchor = ANCHOR_LEFT_UPPER)
+  {
+   if(ObjectFind(0, n) < 0) ObjectCreate(0, n, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER); ObjectSetInteger(0, n, OBJPROP_ANCHOR, anchor);
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x); ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+   ObjectSetString(0, n, OBJPROP_TEXT, txt); ObjectSetInteger(0, n, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, n, OBJPROP_FONTSIZE, sz); ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false);
+   ObjectSetString(0, n, OBJPROP_FONT, bold ? "Arial Bold" : "Arial"); ObjectSetInteger(0, n, OBJPROP_ZORDER, 2);
+  }
+
+void MakeEdit(const string n, const string txt, const int x, const int y, const int w, const int h, const color bg)
+  {
+   if(ObjectFind(0, n) < 0) ObjectCreate(0, n, OBJ_EDIT, 0, 0, 0);
+   ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x); ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, n, OBJPROP_XSIZE, w); ObjectSetInteger(0, n, OBJPROP_YSIZE, h);
+   ObjectSetString(0, n, OBJPROP_TEXT, txt); ObjectSetInteger(0, n, OBJPROP_COLOR, C'245,247,250');
+   ObjectSetInteger(0, n, OBJPROP_BGCOLOR, bg); ObjectSetInteger(0, n, OBJPROP_BORDER_COLOR, C'86,92,112');
+   ObjectSetInteger(0, n, OBJPROP_FONTSIZE, 9); ObjectSetInteger(0, n, OBJPROP_ALIGN, ALIGN_CENTER);
+   
+   ObjectSetInteger(0, n, OBJPROP_SELECTABLE, true);
+   ObjectSetInteger(0, n, OBJPROP_SELECTED, false);
+   ObjectSetInteger(0, n, OBJPROP_READONLY, false);
+   ObjectSetInteger(0, n, OBJPROP_ZORDER, 5);
+  }
+
+void MakeSep(string n, int x, int y, int w)
+  {
+   if(ObjectFind(0, n) < 0) ObjectCreate(0, n, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x); ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, n, OBJPROP_XSIZE, w); ObjectSetInteger(0, n, OBJPROP_YSIZE, 1);
+   ObjectSetInteger(0, n, OBJPROP_BGCOLOR, C'60,66,84'); ObjectSetInteger(0, n, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER); ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false); ObjectSetInteger(0, n, OBJPROP_ZORDER, 2);
+  }
+
+void MakeSmBtn(string n, string txt, int x, int y, int w, int h, color bg)
+  {
+   if(ObjectFind(0, n) < 0) ObjectCreate(0, n, OBJ_BUTTON, 0, 0, 0);
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x); ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, n, OBJPROP_XSIZE, w); ObjectSetInteger(0, n, OBJPROP_YSIZE, h);
+   ObjectSetString(0, n, OBJPROP_TEXT, txt); ObjectSetInteger(0, n, OBJPROP_COLOR, C'245,247,250');
+   ObjectSetInteger(0, n, OBJPROP_BGCOLOR, bg); ObjectSetInteger(0, n, OBJPROP_BORDER_COLOR, C'86,92,112');
+   ObjectSetInteger(0, n, OBJPROP_FONTSIZE, 11); ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false); ObjectSetInteger(0, n, OBJPROP_STATE, false); ObjectSetInteger(0, n, OBJPROP_ZORDER, 3);
+  }
+
+void MakeBigBtn(string n, string txt, int x, int y, int w, int h, color bg)
+  {
+   if(ObjectFind(0, n) < 0) ObjectCreate(0, n, OBJ_BUTTON, 0, 0, 0);
+   ObjectSetInteger(0, n, OBJPROP_XDISTANCE, x); ObjectSetInteger(0, n, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, n, OBJPROP_XSIZE, w); ObjectSetInteger(0, n, OBJPROP_YSIZE, h);
+   ObjectSetString(0, n, OBJPROP_TEXT, txt); ObjectSetInteger(0, n, OBJPROP_COLOR, C'245,247,250');
+   ObjectSetInteger(0, n, OBJPROP_BGCOLOR, bg); ObjectSetInteger(0, n, OBJPROP_BORDER_COLOR, C'86,92,112');
+   ObjectSetInteger(0, n, OBJPROP_FONTSIZE, 9); ObjectSetString(0, n, OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, n, OBJPROP_CORNER, CORNER_LEFT_UPPER); ObjectSetInteger(0, n, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, n, OBJPROP_STATE, false); ObjectSetInteger(0, n, OBJPROP_ZORDER, 3);
+  }
+
+void EnsureHLine(const string name, const double price, const bool show, const color clr, const string tooltip)
+  {
+   if(!show || price <= 0.0) { ObjectDelete(0, name); return; }
+   if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+   ObjectSetDouble(0, name, OBJPROP_PRICE, price); ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH, inp_AvgLineWidth); ObjectSetInteger(0, name, OBJPROP_STYLE, inp_AvgLineStyle);
+   ObjectSetInteger(0, name, OBJPROP_BACK, true); ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN, true); ObjectSetString(0, name, OBJPROP_TOOLTIP, tooltip + " (" + DoubleToString(price, _Digits) + ")");
+  }
+
+//+------------------------------------------------------------------+
+//| 2. MATEMATICKÉ A OBSLUŽNÉ FUNKCE TRHU                            |
+//+------------------------------------------------------------------+
+int CountDecimalsLot() 
+  { 
+   int d = (int)MathRound(-MathLog10(g_VolumeStep)); 
+   return (d < 0) ? 0 : (d > 8) ? 8 : d; 
+  }
+
+double NormalizeLot(double lot)
+  {
+   double step = g_VolumeStep; double mn = g_VolumeMin, mx = g_VolumeMax;
+   lot = MathFloor((lot + 1e-12) / step) * step;
+   if(lot < mn) lot = mn; if(lot > mx) lot = mx;
+   int vd = (int)MathMax(0, MathCeil(-MathLog10(step)));
+   return NormalizeDouble(lot, vd);
+  }
+
+ENUM_ORDER_TYPE_FILLING GetFillingMode(const string sym)
+  {
+   int fm = (int)SymbolInfoInteger(sym, SYMBOL_FILLING_MODE);
+   if((fm & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC) return ORDER_FILLING_IOC;
+   if((fm & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK) return ORDER_FILLING_FOK;
+   return ORDER_FILLING_RETURN;
+  }
+
+bool PositionMatchesFilter(const ulong ticket)
+  {
+   if(!PositionSelectByTicket(ticket)) return false;
+   if(PositionGetString(POSITION_SYMBOL) != _Symbol) return false;
+   if(inp_CountMagicOnly && PositionGetInteger(POSITION_MAGIC) != inp_Magic) return false;
+   return true;
+  }
+
+int CountPositions()
+  {
+   int cnt = 0;
+   for(int i = 0; i < PositionsTotal(); i++) { ulong t = PositionGetTicket(i); if(PositionMatchesFilter(t)) cnt++; }
+   return cnt;
+  }
+
+double FloatingPLFiltered()
+  {
+   double pl = 0.0;
+   for(int i = 0; i < PositionsTotal(); i++) { ulong t = PositionGetTicket(i); if(!PositionMatchesFilter(t)) continue; pl += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP); }
+   return pl;
+  }
+
+double VolumeAndAvgForType(const ENUM_POSITION_TYPE ptype, double &avgPrice)
+  {
+   double volSum = 0.0, pxVol = 0.0;
+   for(int i = 0; i < PositionsTotal(); i++)
+     {
+      ulong t = PositionGetTicket(i); if(!PositionMatchesFilter(t)) continue;
+      if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != ptype) continue;
+      double v = PositionGetDouble(POSITION_VOLUME); double p = PositionGetDouble(POSITION_PRICE_OPEN);
+      volSum += v; pxVol += p * v;
+     }
+   avgPrice = (volSum > 0.0) ? (pxVol / volSum) : 0.0; return volSum;
+  }
+
+double CalcSLFromUSD(const double usdLoss, const double volume, const double openPrice, const ENUM_ORDER_TYPE dir)
+  {
+   if(usdLoss <= 0.0 || volume <= 0.0) return 0.0;
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickSize <= 0.0 || tickValue <= 0.0) return 0.0;
+   double priceDist = usdLoss * tickSize / (volume * tickValue);
+   double sl = (dir == ORDER_TYPE_BUY || dir == ORDER_TYPE_BUY_STOP) ? openPrice - priceDist : openPrice + priceDist;
+   return NormalizeDouble(sl, _Digits);
+  }
+
+double CalcTPFromUSD(const double usdProfit, const double volume, const double openPrice, const ENUM_ORDER_TYPE dir)
+  {
+   if(usdProfit <= 0.0 || volume <= 0.0) return 0.0;
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickSize <= 0.0 || tickValue <= 0.0) return 0.0;
+   double priceDist = usdProfit * tickSize / (volume * tickValue);
+   double tp = (dir == ORDER_TYPE_BUY || dir == ORDER_TYPE_BUY_STOP) ? openPrice + priceDist : openPrice - priceDist;
+   return NormalizeDouble(tp, _Digits);
+  }
+
+//+------------------------------------------------------------------+
+//| 3. AKTUALIZACE STAVŮ A POPISKŮ DASHBOARDU                        |
+//+------------------------------------------------------------------+
+void RefreshLabels(bool forceEditFieldsUpdate = true)
+  {
+   if(forceEditFieldsUpdate)
+     {
+      ObjectSetString(0, "QT_EDIT_COUNT", OBJPROP_TEXT, IntegerToString(g_Count));
+      ObjectSetString(0, "QT_EDIT_PRICE", OBJPROP_TEXT, DoubleToString(g_PendingPrice, _Digits));
+      ObjectSetString(0, "QT_EDIT_SL_USD", OBJPROP_TEXT, DoubleToString(g_SL_USD, 2));
+      ObjectSetString(0, "QT_EDIT_TP_USD", OBJPROP_TEXT, DoubleToString(g_TP_USD, 2));
+     }
+   ObjectSetString(0, "QT_VAL_LOT", OBJPROP_TEXT, DoubleToString(g_Lot, CountDecimalsLot()));
+  }
+
+void UpdatePositionCount()
+  {
+   int n = CountPositions();
+   string scope = inp_CountMagicOnly ? "Poz.(M): " : "Poz.: ";
+   ObjectSetString(0, "QT_POS_INFO", OBJPROP_TEXT, scope + IntegerToString(n));
+
+   double pl = FloatingPLFiltered();
+   color plc = (pl > 0) ? C'80,200,120' : (pl < 0) ? C'240,100,100' : C'160,168,180';
+   string pls = (MathAbs(pl) < 0.0000001) ? "0.00" : DoubleToString(pl, 2);
+   string cur = AccountInfoString(ACCOUNT_CURRENCY);
+   ObjectSetString(0, "QT_PL_INFO", OBJPROP_TEXT, "P/L " + pls + " " + cur);
+   ObjectSetInteger(0, "QT_PL_INFO", OBJPROP_COLOR, plc);
+  }
+
+void UpdateAvgLines()
+  {
+   const string nBuy = OBJ_PREFIX + "HLINE_AVG_BUY";
+   const string nSell = OBJ_PREFIX + "HLINE_AVG_SELL";
+
+   if(!inp_ShowAvgLines)
+     {
+      ObjectDelete(0, nBuy);
+      ObjectDelete(0, nSell);
+      return;
+     }
+
+   double avgBuy = 0, avgSell = 0;
+   double vBuy = VolumeAndAvgForType(POSITION_TYPE_BUY, avgBuy);
+   double vSell = VolumeAndAvgForType(POSITION_TYPE_SELL, avgSell);
+
+   EnsureHLine(nBuy, avgBuy, vBuy > 0.0, inp_ColorAvgBuy, "QT — průměr BUY");
+   EnsureHLine(nSell, avgSell, vSell > 0.0, inp_ColorAvgSell, "QT — průměr SELL");
+  }
+
+void LayoutPanelOrigin()
+  {
+   int ch = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+   g_pad = MathMax(6, MathMin(inp_PanelPadding, 20)); g_pw = inp_PanelWidth; g_px = inp_LeftMargin;
+   g_ph = 275; 
+   g_py = ch - g_ph - (inp_BottomMargin + MathMax(0, inp_PanelOffsetY));
+   g_row = 22; g_btn = 26; g_gap = 3; g_fs_t = 9; g_fs_n = 8; g_fs_v = 9;
+  }
+
+void BuildPanel()
+  {
+   LayoutPanelOrigin();
+   MakeShadow("QT_BG_SHADOW", g_px + 2, g_py + 2, g_pw, g_ph);
+   MakeBg("QT_BG", g_px, g_py, g_pw, g_ph);
+
+   int y = g_py + g_pad; const int xl = g_px + g_pad; const int xr = g_px + g_pw - g_pad; const int xc = g_px + g_pw / 2;
+
+   MakeLabel("QT_TITLE", "QuickTrade", xc, y, g_fs_t, C'245,247,250', true, ANCHOR_CENTER); y += g_fs_t + 4;
+   MakeLabel("QT_SUB", _Symbol, xc, y, g_fs_n, C'150,162,178', false, ANCHOR_CENTER); y += g_fs_n + 8;
+
+   MakeLabel("QT_POS_INFO", (inp_CountMagicOnly ? "Poz.(M): 0" : "Poz.: 0"), xl, y, g_fs_n, C'160,168,180', false, ANCHOR_LEFT_UPPER); y += g_fs_n + 4;
+   MakeLabel("QT_PL_INFO", "P/L: —", xl, y, g_fs_n, C'160,168,180', false, ANCHOR_LEFT_UPPER); y += g_fs_n + 4;
+   MakeLabel("QT_LBL_CUR_PRICE", "Ask: — | Bid: —", xl, y, g_fs_n, C'130,140,158', false, ANCHOR_LEFT_UPPER); y += g_fs_n + 6;
+
+   MakeSep("QT_SEP1", xl, y, g_pw - 2 * g_pad); y += 5;
+
+   int btnS = 24; int gapB = 5; int gapV = 8; int valSlot = 58;
+   const int xPl = xr - btnS; const int xMi = xPl - gapV - valSlot - gapB - btnS; const int xVa = xMi + btnS + gapB;
+
+   // 1. POČET POZIC -> Změněno na OBJ_EDIT pro ruční zápis
+   MakeLabel("QT_LBL_COUNT", "Počet", xl, y + 4, g_fs_n, C'130,140,158', false, ANCHOR_LEFT_UPPER);
+   MakeSmBtn("QT_COUNT_MINUS", "-", xMi, y, btnS, g_row, C'52,56,68');
+   MakeEdit("QT_EDIT_COUNT", IntegerToString(g_Count), xVa, y, valSlot, g_row, C'20,22,30');
+   MakeSmBtn("QT_COUNT_PLUS", "+", xPl, y, btnS, g_row, C'52,56,68'); y += g_row + g_gap;
+
+   // 2. LOTY
+   string lotHint = "Lot " + DoubleToString(g_VolumeStep, CountDecimalsLot());
+   MakeLabel("QT_LBL_LOT", lotHint, xl, y + 4, g_fs_n, C'130,140,158', false, ANCHOR_LEFT_UPPER);
+   MakeSmBtn("QT_LOT_MINUS", "-", xMi, y, btnS, g_row, C'52,56,68');
+   MakeLabel("QT_VAL_LOT", DoubleToString(g_Lot, CountDecimalsLot()), xVa, y + 4, g_fs_v, C'245,247,250', true, ANCHOR_LEFT_UPPER);
+   MakeSmBtn("QT_LOT_PLUS", "+", xPl, y, btnS, g_row, C'52,56,68'); y += g_row + g_gap + 4;
+
+   MakeSep("QT_SEP2", xl, y, g_pw - 2 * g_pad); y += 5;
+
+   // 3. PENDING LIMIT CENA -> Vstupní pole chráněné proti přepsání tickem
+   int xBtnM = xl + 32; int xEdP = xBtnM + 19; int xBtnP = xEdP + 59; int xBtnS = xBtnP + 19;
+   MakeLabel("QT_LBL_PRICE", "Cena", xl, y + 4, g_fs_n, C'130,140,158', false, ANCHOR_LEFT_UPPER);
+   MakeSmBtn("QT_PRICE_MINUS", "-", xBtnM, y, 17, g_row, C'52,56,68');
+   MakeEdit("QT_EDIT_PRICE", DoubleToString(g_PendingPrice, _Digits), xEdP, y, 57, g_row, C'20,22,30');
+   MakeSmBtn("QT_PRICE_PLUS", "+", xBtnP, y, 17, g_row, C'52,56,68');
+   MakeSmBtn("QT_PRICE_SNAP", "S", xBtnS, y, 17, g_row, C'0,100,180'); y += g_row + g_gap;
+
+   // 4. SL / TP V USD
+   int halfW = (g_pw - 2 * g_pad - 6) / 2;
+   int xSlL = xl; int xSlE = xl + 28; int xTpL = xl + halfW + 4; int xTpE = xTpL + 28;
+   MakeLabel("QT_LBL_SLUSD", "SL $", xSlL, y + 4, g_fs_n, C'130,140,158', false, ANCHOR_LEFT_UPPER);
+   MakeEdit("QT_EDIT_SL_USD", DoubleToString(g_SL_USD, 2), xSlE, y, 46, g_row, C'20,22,30');
+   MakeLabel("QT_LBL_TPUSD", "TP $", xTpL, y + 4, g_fs_n, C'130,140,158', false, ANCHOR_LEFT_UPPER);
+   MakeEdit("QT_EDIT_TP_USD", DoubleToString(g_TP_USD, 2), xTpE, y, 46, g_row, C'20,22,30'); y += g_row + g_gap + 4;
+
+   MakeSep("QT_SEP3", xl, y, g_pw - 2 * g_pad); y += 5;
+
+   // EXEKUČNÍ TLAČÍTKA
+   const int bw = (g_pw - 2 * g_pad - g_gap) / 2;
+   MakeBigBtn("QT_BTN_BUY", "BUY", xl, y, bw, g_btn, C'0,132,90');
+   MakeBigBtn("QT_BTN_SELL", "SELL", xl + bw + g_gap, y, bw, g_btn, C'178,42,52'); y += g_btn + g_gap;
+
+   MakeBigBtn("QT_BTN_BUYSTOP", "BUY STOP", xl, y, bw, g_btn, C'0,90,65');
+   MakeBigBtn("QT_BTN_SELLSTOP", "SELL STOP", xl + bw + g_gap, y, bw, g_btn, C'135,30,38'); y += g_btn + g_gap;
+
+   MakeBigBtn("QT_BTN_CLOSE", "Zavřít", xl, y, g_pw - 2 * g_pad, g_btn, C'72,76,96'); y += g_btn + 6;
+
+   MakeLabel("QT_STATUS", "OK", xl, y, g_fs_n - 1, C'120,128,145', false, ANCHOR_LEFT_UPPER);
+   ChartRedraw(0);
+  }
+
+//+------------------------------------------------------------------+
+//| 4. OBCHODNÍ EXEKUČNÍ LOGIKA (EXECUTION PORTS)                     |
+//+------------------------------------------------------------------+
+bool CanTradeBurst()
+  {
+   ulong now = GetTickCount64();
+   if(now - g_lastTradeTick < (ulong)TRADE_COOLDOWN_MS) { ToastMessage("Počkejte chvíli..."); return false; }
+   g_lastTradeTick = now; return true;
+  }
+
+void ToastMessage(const string text)
+  {
+   string t = text; if(StringLen(t) > 42) t = StringSubstr(t, 0, 39) + "...";
+   ObjectSetString(0, "QT_STATUS", OBJPROP_TEXT, t);
+   ObjectSetInteger(0, "QT_STATUS", OBJPROP_COLOR, C'200,200,220');
+   ChartRedraw(0);
+  }
+
+void ExecuteOpen(const ENUM_ORDER_TYPE dir)
+  {
+   string sym = _Symbol; ENUM_ORDER_TYPE_FILLING fill = GetFillingMode(sym);
+   int opened = 0, failed = 0; uint lastRetcode = 0;
+
+   for(int i = 0; i < g_Count; i++)
+     {
+      MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); ZeroMemory(res);
+      req.action = TRADE_ACTION_DEAL; req.symbol = sym; req.volume = g_Lot; req.type = dir;
+      req.price = (dir == ORDER_TYPE_BUY) ? SymbolInfoDouble(sym, SYMBOL_ASK) : SymbolInfoDouble(sym, SYMBOL_BID);
+      req.deviation = 20; req.magic = inp_Magic; req.comment = inp_Comment; req.type_filling = fill;
+      
+      if(g_SL_USD > 0.0) req.sl = CalcSLFromUSD(g_SL_USD, req.volume, req.price, dir);
+      if(g_TP_USD > 0.0) req.tp = CalcTPFromUSD(g_TP_USD, req.volume, req.price, dir);
+      
+      if(OrderSend(req, res)) opened++; else { failed++; lastRetcode = res.retcode; }
+     }
+   string msg = StringFormat("[%s] Otevřeno: %d | Selhalo: %d", (dir == ORDER_TYPE_BUY) ? "BUY" : "SELL", opened, failed);
+   ToastMessage(msg);
+  }
+
+void ExecutePending(const ENUM_ORDER_TYPE dir)
+  {
+   string sym = _Symbol; ENUM_ORDER_TYPE_FILLING fill = GetFillingMode(sym);
+   double ask = SymbolInfoDouble(sym, SYMBOL_ASK); double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   int opened = 0, failed = 0; uint lastRetcode = 0;
+
+   if(dir == ORDER_TYPE_BUY_STOP && g_PendingPrice <= ask)
+     { ObjectSetString(0, "QT_STATUS", OBJPROP_TEXT, "Chyba: Vstup musí být nad ASK!"); ChartRedraw(0); return; }
+   if(dir == ORDER_TYPE_SELL_STOP && g_PendingPrice >= bid)
+     { ObjectSetString(0, "QT_STATUS", OBJPROP_TEXT, "Chyba: Vstup musí být pod BID!"); ChartRedraw(0); return; }
+
+   for(int i = 0; i < g_Count; i++)
+     {
+      MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); ZeroMemory(res);
+      req.action = TRADE_ACTION_PENDING; req.symbol = sym; req.volume = g_Lot; req.type = dir;
+      req.price = g_PendingPrice;
+      req.deviation = 20; req.magic = inp_Magic; req.comment = inp_Comment; req.type_filling = fill;
+
+      if(g_SL_USD > 0.0) req.sl = CalcSLFromUSD(g_SL_USD, req.volume, req.price, dir);
+      if(g_TP_USD > 0.0) req.tp = CalcTPFromUSD(g_TP_USD, req.volume, req.price, dir);
+
+      if(OrderSend(req, res)) opened++; else { failed++; lastRetcode = res.retcode; }
+     }
+   string msg = StringFormat("[%s] Zadáno: %d | Selhalo: %d", (dir == ORDER_TYPE_BUY_STOP) ? "BUY STOP" : "SELL STOP", opened, failed);
+   ToastMessage(msg);
+  }
+
+void ExecuteClose()
+  {
+   string sym = _Symbol; ENUM_ORDER_TYPE_FILLING fill = GetFillingMode(sym);
+   int closed = 0, failed = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i); if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != sym) continue;
+      if(inp_CloseOnlyMagic && PositionGetInteger(POSITION_MAGIC) != inp_Magic) continue;
+
+      MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); ZeroMemory(res);
+      req.action = TRADE_ACTION_DEAL; req.symbol = sym; req.volume = PositionGetDouble(POSITION_VOLUME);
+      req.position = ticket; req.deviation = 20; req.type_filling = fill;
+      
+      if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+        { req.type = ORDER_TYPE_SELL; req.price = SymbolInfoDouble(sym, SYMBOL_BID); }
+      else
+        { req.type = ORDER_TYPE_BUY; req.price = SymbolInfoDouble(sym, SYMBOL_ASK); }
+        
+      if(OrderSend(req, res)) closed++; else failed++;
+     }
+   ToastMessage(StringFormat("[CLOSE] Zavřeno: %d | Selhalo: %d", closed, failed));
+  }
+
+//+------------------------------------------------------------------+
+//| 5. VESTAVĚNÉ SYSTÉMOVÉ UDÁLOSTI (EVENT HANDLERS)                 |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   g_Count = inp_DefaultCount;
+   g_Lot   = NormalizeLot(inp_DefaultLot);
+   g_SL_USD = inp_DefaultSL_USD;
+   g_TP_USD = inp_DefaultTP_USD;
+   g_PendingPrice = NormalizeDouble(SymbolInfoDouble(_Symbol, SYMBOL_ASK), _Digits);
+   
+   g_VolumeStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   g_VolumeMin  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   g_VolumeMax  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(g_VolumeStep <= 0) g_VolumeStep = 0.01;
+   if(g_VolumeMin  <= 0) g_VolumeMin  = g_VolumeStep;
+
+   BuildPanel();
+   UpdatePositionCount();
+   UpdateAvgLines();
+   RefreshLabels(true);
+   return(INIT_SUCCEEDED);
+  }
+
+void OnDeinit(const int reason)
+  {
+   ObjectsDeleteAll(0, OBJ_PREFIX);
+   Comment("");
+  }
+
+void OnTick()
+  {
+   UpdatePositionCount();
+   UpdateAvgLines();
+   
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   ObjectSetString(0, "QT_LBL_CUR_PRICE", OBJPROP_TEXT, StringFormat("Ask:%s | Bid:%s", DoubleToString(ask, _Digits), DoubleToString(bid, _Digits)));
+   
+   if(g_PendingPrice == 0.0)
+     {
+      g_PendingPrice = ask;
+      RefreshLabels(true);
+     }
+   // Volání RefreshLabels(false) zrušeno – vyřešilo přemazávání rozepsaného inputu
+   ChartRedraw(0);
+  }
+
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
+  {
+   if(trans.symbol == _Symbol)
+     {
+      UpdatePositionCount();
+      UpdateAvgLines();
+      ChartRedraw(0);
+     }
+  }
+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+  {
+   // Detekce dokončení úpravy textových polí (ENTER nebo kliknutí vedle)
+   if(id == CHARTEVENT_OBJECT_ENDEDIT)
+     {
+      if(sparam == "QT_EDIT_COUNT")
+        {
+         string text = ObjectGetString(0, "QT_EDIT_COUNT", OBJPROP_TEXT);
+         int val = (int)StringToInteger(text);
+         g_Count = (val < 1) ? 1 : val; 
+        }
+      if(sparam == "QT_EDIT_PRICE")
+        {
+         string text = ObjectGetString(0, "QT_EDIT_PRICE", OBJPROP_TEXT);
+         StringReplace(text, ",", ".");
+         g_PendingPrice = NormalizeDouble(StringToDouble(text), _Digits);
+        }
+      if(sparam == "QT_EDIT_SL_USD")
+        {
+         string text = ObjectGetString(0, "QT_EDIT_SL_USD", OBJPROP_TEXT);
+         StringReplace(text, ",", "."); 
+         g_SL_USD = MathMax(0.0, StringToDouble(text));
+        }
+      if(sparam == "QT_EDIT_TP_USD")
+        {
+         string text = ObjectGetString(0, "QT_EDIT_TP_USD", OBJPROP_TEXT);
+         StringReplace(text, ",", "."); 
+         g_TP_USD = MathMax(0.0, StringToDouble(text));
+        }
+      
+      RefreshLabels(true); 
+      ChartRedraw(0);
+      return;
+     }
+
+   if(id == CHARTEVENT_CHART_CHANGE)
+     {
+      int cw = (int)ChartGetInteger(0, CHART_WIDTH_IN_PIXELS);
+      int ch = (int)ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS);
+      if(cw == s_lastChartW && ch == s_lastChartH && ObjectFind(0, "QT_BG") >= 0) return;
+      s_lastChartW = cw; s_lastChartH = ch;
+      BuildPanel();
+      RefreshLabels(true);
+      UpdatePositionCount();
+      ChartRedraw(0);
+      return;
+     }
+     
+   if(id != CHARTEVENT_OBJECT_CLICK) return;
+
+   if(sparam == "QT_BTN_BUY")
+     {
+      if(CanTradeBurst()) ExecuteOpen(ORDER_TYPE_BUY);
+      ObjectSetInteger(0, "QT_BTN_BUY", OBJPROP_STATE, false);
+      ChartRedraw(0); return;
+     }
+   if(sparam == "QT_BTN_SELL")
+     {
+      if(CanTradeBurst()) ExecuteOpen(ORDER_TYPE_SELL);
+      ObjectSetInteger(0, "QT_BTN_SELL", OBJPROP_STATE, false);
+      ChartRedraw(0); return;
+     }
+   if(sparam == "QT_BTN_BUYSTOP")
+     {
+      if(CanTradeBurst()) ExecutePending(ORDER_TYPE_BUY_STOP);
+      ObjectSetInteger(0, "QT_BTN_BUYSTOP", OBJPROP_STATE, false);
+      ChartRedraw(0); return;
+     }
+   if(sparam == "QT_BTN_SELLSTOP")
+     {
+      if(CanTradeBurst()) ExecutePending(ORDER_TYPE_SELL_STOP);
+      ObjectSetInteger(0, "QT_BTN_SELLSTOP", OBJPROP_STATE, false);
+      ChartRedraw(0); return;
+     }
+   if(sparam == "QT_BTN_CLOSE")
+     {
+      if(inp_ConfirmClose)
+        {
+         int r = MessageBox("Opravdu zavřít všechny pozice?", "QuickTrade — potvrzení", MB_YESNO | MB_ICONQUESTION);
+         if(r != IDYES) { ObjectSetInteger(0, "QT_BTN_CLOSE", OBJPROP_STATE, false); ChartRedraw(0); return; }
+        }
+      ExecuteClose();
+      ObjectSetInteger(0, "QT_BTN_CLOSE", OBJPROP_STATE, false);
+      ChartRedraw(0); return;
+     }
+
+   if(sparam == "QT_COUNT_PLUS")
+     { g_Count++; RefreshLabels(true); ObjectSetInteger(0, "QT_COUNT_PLUS", OBJPROP_STATE, false); ChartRedraw(0); return; }
+   if(sparam == "QT_COUNT_MINUS")
+     { if(g_Count > 1) g_Count--; RefreshLabels(true); ObjectSetInteger(0, "QT_COUNT_MINUS", OBJPROP_STATE, false); ChartRedraw(0); return; }
+
+   if(sparam == "QT_LOT_PLUS")
+     { g_Lot = NormalizeLot(g_Lot + g_VolumeStep); RefreshLabels(true); ObjectSetInteger(0, "QT_LOT_PLUS", OBJPROP_STATE, false); ChartRedraw(0); return; }
+   if(sparam == "QT_LOT_MINUS")
+     { g_Lot = NormalizeLot(MathMax(g_VolumeMin, g_Lot - g_VolumeStep)); RefreshLabels(true); ObjectSetInteger(0, "QT_LOT_MINUS", OBJPROP_STATE, false); ChartRedraw(0); return; }
+
+   double pointStep = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 50; 
+   if(sparam == "QT_PRICE_PLUS")
+     { g_PendingPrice = NormalizeDouble(g_PendingPrice + pointStep, _Digits); RefreshLabels(true); ObjectSetInteger(0, "QT_PRICE_PLUS", OBJPROP_STATE, false); ChartRedraw(0); return; }
+   if(sparam == "QT_PRICE_MINUS")
+     { g_PendingPrice = NormalizeDouble(g_PendingPrice - pointStep, _Digits); RefreshLabels(true); ObjectSetInteger(0, "QT_PRICE_MINUS", OBJPROP_STATE, false); ChartRedraw(0); return; }
+   if(sparam == "QT_PRICE_SNAP")
+     { g_PendingPrice = NormalizeDouble(SymbolInfoDouble(_Symbol, SYMBOL_ASK), _Digits); RefreshLabels(true); ObjectSetInteger(0, "QT_PRICE_SNAP", OBJPROP_STATE, false); ChartRedraw(0); return; }
+  }
